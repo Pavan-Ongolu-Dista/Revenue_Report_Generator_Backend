@@ -6,7 +6,25 @@ import dotenv from 'dotenv';
 dotenv.config();
 
 const app = express();
-app.use(cors());
+
+// CORS configuration
+app.use(cors({
+  origin: [
+    'http://localhost:3173',
+    'http://localhost:3000',
+    'http://localhost:4000',
+    'http://localhost:5173',
+    'http://127.0.0.1:3173',
+    'http://127.0.0.1:3000',
+    'http://127.0.0.1:4000',
+    'http://127.0.0.1:5173'
+  ],
+  credentials: true,
+  methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS', 'PATCH'],
+  allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With'],
+  optionsSuccessStatus: 200
+}));
+
 app.use(express.json());
 
 const PORT = process.env.SERVER_PORT || 4000;
@@ -1147,6 +1165,230 @@ app.post('/api/report', async (req, res) => {
       error: err?.response?.data?.errors || err.message,
       status: err?.response?.status || 500,
       message: 'Failed to generate report'
+    };
+    res.status(errorResponse.status).json(errorResponse);
+  }
+});
+
+// New endpoint to get detailed order information with line items (matching CSV format)
+app.post('/api/order-details', async (req, res) => {
+  try {
+    const { start, end, customerId } = req.body;
+    
+    // Validate request body
+    if (!start || !end) {
+      return res.status(400).json({ 
+        error: 'Missing required fields: start and end are required' 
+      });
+    }
+
+    if (!customerId) {
+      return res.status(400).json({ 
+        error: 'customerId is required' 
+      });
+    }
+
+    log('Fetching detailed order information', { start, end, customerId });
+    
+    const limit = 250;
+    const params = new URLSearchParams({
+      limit: String(limit),
+      status: 'any',
+      fulfillment_status: 'shipped',
+      created_at_min: new Date(start).toISOString(),
+      created_at_max: new Date(end).toISOString(),
+      customer_id: String(customerId),
+      fields: 'id,name,created_at,updated_at,customer,line_items,metafields,fulfillments'
+    });
+    
+    const orders = [];
+    let since_id = null;
+    let totalFetched = 0;
+    
+    // Fetch all orders for the customer in the date range
+    while (true) {
+      const requestParams = new URLSearchParams(params);
+      if (since_id) {
+        requestParams.set('since_id', since_id);
+      }
+      
+      const { data } = await shopify().get(`orders.json?${requestParams.toString()}`);
+      const chunk = data.orders || [];
+      orders.push(...chunk);
+      totalFetched += chunk.length;
+      
+      if (chunk.length < limit) break;
+      since_id = chunk[chunk.length - 1].id;
+      
+      if (totalFetched > 10000) {
+        log('WARNING: Reached maximum records limit (10000)', { totalFetched });
+        break;
+      }
+    }
+
+    log('Fetched orders for detailed analysis', { count: orders.length });
+
+    // Build detailed line items data exactly matching CSV format
+    const orderLineItems = [];
+
+    for (const order of orders) {
+      try {
+        // Fetch metafields using GraphQL to get additional charges
+        const metafieldQuery = `
+          query getOrderMetafields($id: ID!) {
+            order(id: $id) {
+              id
+              name
+              metafields(first: 10) {
+                edges {
+                  node {
+                    namespace
+                    key
+                    value
+                    type
+                  }
+                }
+              }
+            }
+          }
+        `;
+        
+        const { data: metafieldData } = await shopify().post('graphql.json', {
+          query: metafieldQuery,
+          variables: { id: `gid://shopify/Order/${order.id}` }
+        });
+
+        const orderMetafields = metafieldData.data?.order?.metafields?.edges?.map(edge => edge.node) || [];
+        const additionalCharges = parseAdditionalCharges(orderMetafields);
+
+        // Get the fulfilled date from fulfillments
+        let fulfilledDate = null;
+        if (order.fulfillments && order.fulfillments.length > 0) {
+          // Get the most recent fulfillment date
+          fulfilledDate = order.fulfillments.reduce((latest, f) => {
+            const fDate = new Date(f.updated_at || f.created_at);
+            const latestDate = latest ? new Date(latest) : new Date(0);
+            return fDate > latestDate ? f.updated_at || f.created_at : latest;
+          }, null);
+        }
+
+        const orderNumber = order.name ? String(order.name).replace('#','').trim() : String(order.id);
+        const customerEmail = order.customer?.email || null;
+        const customerName = getCustomerName(order.customer?.id);
+        const createdDate = order.created_at;
+
+        // Process line items - each line item becomes a row
+        if (order.line_items && order.line_items.length > 0) {
+          order.line_items.forEach((lineItem, index) => {
+            // Skip cancelled, refunded, or removed items
+            if (lineItem.fulfillment_status === 'cancelled' || 
+                lineItem.fulfillment_status === 'refunded' ||
+                lineItem.fulfillment_status === 'removed') {
+              return;
+            }
+
+            const quantity = Number(lineItem.quantity) || 0;
+            const unitPrice = Number(lineItem.price) || 0;
+            const totalPrice = (unitPrice * quantity);
+
+            orderLineItems.push({
+              order_id: order.id,
+              order_number: orderNumber,
+              created_date: createdDate,
+              fulfilled_date: fulfilledDate || createdDate,
+              product_title: lineItem.title || lineItem.name,
+              variant_title: lineItem.variant_title || '',
+              sku: lineItem.sku || '',
+              unit_price: unitPrice,
+              quantity: quantity,
+              price: parseFloat(totalPrice.toFixed(2)),
+              additional_charges: index === 0 ? additionalCharges : 0, // Additional charges only on first line item
+              customer_id: order.customer?.id,
+              customer_name: customerName,
+              customer_email: customerEmail,
+              fulfillment_status: lineItem.fulfillment_status
+            });
+
+            log(`Order ${orderNumber}: Line item "${lineItem.title}" - Qty: ${quantity}, Unit: $${unitPrice}, Total: $${totalPrice.toFixed(2)}`);
+          });
+        }
+
+        // Small delay to avoid rate limiting
+        await new Promise(resolve => setTimeout(resolve, 50));
+      } catch (error) {
+        log(`Error processing order ${order.id}:`, error.message);
+        
+        // Add minimal line items even if metafield fetch fails
+        if (order.line_items && order.line_items.length > 0) {
+          const orderNumber = order.name ? String(order.name).replace('#','').trim() : String(order.id);
+          
+          order.line_items.forEach((lineItem, index) => {
+            if (lineItem.fulfillment_status === 'cancelled' || 
+                lineItem.fulfillment_status === 'refunded' ||
+                lineItem.fulfillment_status === 'removed') {
+              return;
+            }
+
+            const quantity = Number(lineItem.quantity) || 0;
+            const unitPrice = Number(lineItem.price) || 0;
+            const totalPrice = (unitPrice * quantity);
+
+            orderLineItems.push({
+              order_id: order.id,
+              order_number: orderNumber,
+              created_date: order.created_at,
+              fulfilled_date: order.created_at,
+              product_title: lineItem.title || lineItem.name,
+              variant_title: lineItem.variant_title || '',
+              sku: lineItem.sku || '',
+              unit_price: unitPrice,
+              quantity: quantity,
+              price: parseFloat(totalPrice.toFixed(2)),
+              additional_charges: 0,
+              customer_id: order.customer?.id,
+              customer_name: getCustomerName(order.customer?.id),
+              customer_email: order.customer?.email || null,
+              fulfillment_status: lineItem.fulfillment_status,
+              error: error.message
+            });
+          });
+        }
+      }
+    }
+
+    // Calculate summary statistics
+    const totalItems = orderLineItems.length;
+    const totalAmount = orderLineItems.reduce((sum, i) => sum + i.price, 0);
+    const totalAdditionalCharges = orderLineItems.reduce((sum, i) => sum + i.additional_charges, 0);
+    const totalWithCharges = totalAmount + totalAdditionalCharges;
+
+    log('Order line items processed', { 
+      totalItems, 
+      totalAmount,
+      totalAdditionalCharges 
+    });
+
+    res.json({
+      order_line_items: orderLineItems,
+      summary: {
+        total_line_items: totalItems,
+        total_amount: parseFloat(totalAmount.toFixed(2)),
+        total_additional_charges: parseFloat(totalAdditionalCharges.toFixed(2)),
+        total_with_charges: parseFloat(totalWithCharges.toFixed(2)),
+        date_range: { start, end },
+        customer_id: customerId
+      },
+      metadata: {
+        generated_at: new Date().toISOString(),
+        total_records: orderLineItems.length
+      }
+    });
+  } catch (err) {
+    log('Error fetching order details', err.message);
+    const errorResponse = {
+      error: err?.response?.data?.errors || err.message,
+      status: err?.response?.status || 500,
+      message: 'Failed to fetch detailed order information'
     };
     res.status(errorResponse.status).json(errorResponse);
   }

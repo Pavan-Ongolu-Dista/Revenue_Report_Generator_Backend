@@ -1,0 +1,12 @@
+# Node
+node_modules/
+
+# Env
+.env
+.env.*
+
+# Logs
+npm-debug.log*
+
+# Editor
+.vscode/
