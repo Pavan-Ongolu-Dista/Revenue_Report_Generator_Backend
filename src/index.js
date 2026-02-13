@@ -8,22 +8,34 @@ dotenv.config();
 const app = express();
 
 // CORS configuration
-app.use(cors({
-  origin: [
-    'http://localhost:3173',
-    'http://localhost:3000',
-    'http://localhost:4000',
-    'http://localhost:5173',
-    'http://127.0.0.1:3173',
-    'http://127.0.0.1:3000',
-    'http://127.0.0.1:4000',
-    'http://127.0.0.1:5173'
-  ],
-  credentials: true,
-  methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS', 'PATCH'],
-  allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With'],
-  optionsSuccessStatus: 200
-}));
+// CORS: allow known development origins and deployed frontend origin
+const allowedOrigins = [
+  'http://localhost:3173',
+  'http://localhost:3000',
+  'http://localhost:4000',
+  'http://localhost:5173',
+  'http://127.0.0.1:3173',
+  'http://127.0.0.1:3000',
+  'http://127.0.0.1:4000',
+  'http://127.0.0.1:5173',
+  // deployed frontend origin (update if your frontend URL changes)
+  'https://revenue-report-generator-frontend.vercel.app'
+]
+
+app.use((req, res, next) => {
+  const origin = req.header('Origin')
+  if (origin && allowedOrigins.includes(origin)) {
+    res.header('Access-Control-Allow-Origin', origin)
+    res.header('Access-Control-Allow-Credentials', 'true')
+    res.header('Access-Control-Allow-Methods', 'GET,POST,PUT,DELETE,OPTIONS,PATCH')
+    res.header('Access-Control-Allow-Headers', 'Content-Type,Authorization,X-Requested-With')
+  }
+  // Handle preflight
+  if (req.method === 'OPTIONS') {
+    return res.sendStatus(200)
+  }
+  next()
+})
 
 app.use(express.json());
 
