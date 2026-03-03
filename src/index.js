@@ -1339,19 +1339,21 @@ app.post('/api/order-details', async (req, res) => {
 
           const orderFulfillmentData = fulfillmentData.data?.order;
           let fulfillmentLineItemIndex = 0;
+          let hadFulfillmentItems = false;
           
           if (orderFulfillmentData && orderFulfillmentData.fulfillments && orderFulfillmentData.fulfillments.length > 0) {
             // Process only SUCCESS fulfillments
             for (const fulfillment of orderFulfillmentData.fulfillments) {
-              if (fulfillment.status === 'SUCCESS' && fulfillment.fulfillmentLineItems?.edges) {
+              if (fulfillment.status === 'SUCCESS' && fulfillment.fulfillmentLineItems?.edges && fulfillment.fulfillmentLineItems.edges.length > 0) {
+                hadFulfillmentItems = true;
                 for (const edge of fulfillment.fulfillmentLineItems.edges) {
                   const node = edge.node;
                   const lineItemData = node.lineItem;
                   const quantity = Number(node.quantity) || 0;
-                  const originalTotal = node.originalTotalSet?.shopMoney?.amount || 0;
+                  const originalTotal = Number(node.originalTotalSet?.shopMoney?.amount) || 0;
                   const unitPrice = quantity > 0 ? originalTotal / quantity : 0;
                   
-                  if (quantity > 0) {
+                  if (quantity > 0 && originalTotal > 0) {
                     orderLineItems.push({
                       order_id: order.id,
                       order_number: orderNumber,
@@ -1377,13 +1379,13 @@ app.post('/api/order-details', async (req, res) => {
               }
             }
           }
-        } catch (fulfillmentErr) {
-          log(`Order ${order.id}: Error fetching fulfillments via GraphQL:`, fulfillmentErr.message);
-          // Fallback to line items only if fulfillment query fails (but still skip cancelled items)
-          if (order.line_items && order.line_items.length > 0) {
+
+          // Only fall back to line items if we found NO fulfillment items
+          if (!hadFulfillmentItems && order.line_items && order.line_items.length > 0) {
+            log(`Order ${order.id}: No fulfillment items found, falling back to line items`);
             let lineItemIndex = 0;
             order.line_items.forEach((lineItem) => {
-              // Skip cancelled, refunded, or removed items
+              // Skip cancelled, refunded, or removed items - also skip items with 0 quantity or 0 price
               if (lineItem.fulfillment_status === 'cancelled' || 
                   lineItem.fulfillment_status === 'refunded' ||
                   lineItem.fulfillment_status === 'removed') {
@@ -1393,6 +1395,11 @@ app.post('/api/order-details', async (req, res) => {
               const quantity = Number(lineItem.quantity) || 0;
               const unitPrice = Number(lineItem.price) || 0;
               const totalPrice = (unitPrice * quantity);
+
+              // Skip items with zero quantity or zero price
+              if (quantity <= 0 || unitPrice <= 0) {
+                return;
+              }
 
               orderLineItems.push({
                 order_id: order.id,
@@ -1413,6 +1420,50 @@ app.post('/api/order-details', async (req, res) => {
               });
 
               log(`Order ${orderNumber}: Fallback item "${lineItem.title}" - Qty: ${quantity}, Unit: $${unitPrice}, Total: $${totalPrice.toFixed(2)}`);
+              lineItemIndex++;
+            });
+          }
+        } catch (fulfillmentErr) {
+          log(`Order ${order.id}: Error fetching fulfillments via GraphQL:`, fulfillmentErr.message);
+          // Fallback to line items with strict filtering if query fails
+          if (order.line_items && order.line_items.length > 0) {
+            let lineItemIndex = 0;
+            order.line_items.forEach((lineItem) => {
+              // Skip cancelled, refunded, or removed items - also skip items with 0 quantity or 0 price
+              if (lineItem.fulfillment_status === 'cancelled' || 
+                  lineItem.fulfillment_status === 'refunded' ||
+                  lineItem.fulfillment_status === 'removed') {
+                return;
+              }
+
+              const quantity = Number(lineItem.quantity) || 0;
+              const unitPrice = Number(lineItem.price) || 0;
+              const totalPrice = (unitPrice * quantity);
+
+              // Skip items with zero quantity or zero price
+              if (quantity <= 0 || unitPrice <= 0) {
+                return;
+              }
+
+              orderLineItems.push({
+                order_id: order.id,
+                order_number: orderNumber,
+                created_date: createdDate,
+                fulfilled_date: fulfilledDate || createdDate,
+                product_title: lineItem.title || lineItem.name,
+                variant_title: lineItem.variant_title || '',
+                sku: lineItem.sku || '',
+                unit_price: unitPrice,
+                quantity: quantity,
+                price: parseFloat(totalPrice.toFixed(2)),
+                additional_charges: lineItemIndex === 0 ? additionalCharges : 0,
+                customer_id: order.customer?.id,
+                customer_name: customerName,
+                customer_email: customerEmail,
+                fulfillment_status: lineItem.fulfillment_status
+              });
+
+              log(`Order ${orderNumber}: Fallback (error) item "${lineItem.title}" - Qty: ${quantity}, Unit: $${unitPrice}, Total: $${totalPrice.toFixed(2)}`);
               lineItemIndex++;
             });
           }
