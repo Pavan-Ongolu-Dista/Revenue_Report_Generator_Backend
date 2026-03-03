@@ -1289,82 +1289,140 @@ app.post('/api/order-details', async (req, res) => {
         const customerName = getCustomerName(order.customer?.id);
         const createdDate = order.created_at;
 
-        // Process line items - each line item becomes a row
-        if (order.line_items && order.line_items.length > 0) {
-          order.line_items.forEach((lineItem, index) => {
-            // Skip cancelled, refunded, or removed items
-            if (lineItem.fulfillment_status === 'cancelled' || 
-                lineItem.fulfillment_status === 'refunded' ||
-                lineItem.fulfillment_status === 'removed') {
-              return;
+        // Fetch fulfillments using GraphQL to only include fulfilled items
+        try {
+          const orderId = `gid://shopify/Order/${order.id}`;
+          const fulfillmentQuery = `
+            query {
+              order(id: "${orderId}") {
+                id
+                name
+                fulfillments(first: 10) {
+                  id
+                  status
+                  fulfillmentLineItems(first: 50) {
+                    edges {
+                      node {
+                        id
+                        quantity
+                        lineItem {
+                          id
+                          title
+                          sku
+                          quantity
+                          variant {
+                            id
+                            title
+                          }
+                          product {
+                            id
+                            title
+                          }
+                        }
+                        originalTotalSet {
+                          shopMoney {
+                            amount
+                            currencyCode
+                          }
+                        }
+                      }
+                    }
+                  }
+                }
+              }
             }
-
-            const quantity = Number(lineItem.quantity) || 0;
-            const unitPrice = Number(lineItem.price) || 0;
-            const totalPrice = (unitPrice * quantity);
-
-            orderLineItems.push({
-              order_id: order.id,
-              order_number: orderNumber,
-              created_date: createdDate,
-              fulfilled_date: fulfilledDate || createdDate,
-              product_title: lineItem.title || lineItem.name,
-              variant_title: lineItem.variant_title || '',
-              sku: lineItem.sku || '',
-              unit_price: unitPrice,
-              quantity: quantity,
-              price: parseFloat(totalPrice.toFixed(2)),
-              additional_charges: index === 0 ? additionalCharges : 0, // Additional charges only on first line item
-              customer_id: order.customer?.id,
-              customer_name: customerName,
-              customer_email: customerEmail,
-              fulfillment_status: lineItem.fulfillment_status
-            });
-
-            log(`Order ${orderNumber}: Line item "${lineItem.title}" - Qty: ${quantity}, Unit: $${unitPrice}, Total: $${totalPrice.toFixed(2)}`);
+          `;
+          
+          const { data: fulfillmentData } = await shopify().post('graphql.json', {
+            query: fulfillmentQuery
           });
+
+          const orderFulfillmentData = fulfillmentData.data?.order;
+          let fulfillmentLineItemIndex = 0;
+          
+          if (orderFulfillmentData && orderFulfillmentData.fulfillments && orderFulfillmentData.fulfillments.length > 0) {
+            // Process only SUCCESS fulfillments
+            for (const fulfillment of orderFulfillmentData.fulfillments) {
+              if (fulfillment.status === 'SUCCESS' && fulfillment.fulfillmentLineItems?.edges) {
+                for (const edge of fulfillment.fulfillmentLineItems.edges) {
+                  const node = edge.node;
+                  const lineItemData = node.lineItem;
+                  const quantity = Number(node.quantity) || 0;
+                  const originalTotal = node.originalTotalSet?.shopMoney?.amount || 0;
+                  const unitPrice = quantity > 0 ? originalTotal / quantity : 0;
+                  
+                  if (quantity > 0) {
+                    orderLineItems.push({
+                      order_id: order.id,
+                      order_number: orderNumber,
+                      created_date: createdDate,
+                      fulfilled_date: fulfilledDate || createdDate,
+                      product_title: lineItemData?.title || 'N/A',
+                      variant_title: lineItemData?.variant?.title || '',
+                      sku: lineItemData?.sku || '',
+                      unit_price: parseFloat(unitPrice.toFixed(2)),
+                      quantity: quantity,
+                      price: parseFloat(originalTotal.toFixed(2)),
+                      additional_charges: fulfillmentLineItemIndex === 0 ? additionalCharges : 0, // Additional charges only on first item
+                      customer_id: order.customer?.id,
+                      customer_name: customerName,
+                      customer_email: customerEmail,
+                      fulfillment_status: 'fulfilled'
+                    });
+
+                    log(`Order ${orderNumber}: Fulfilled item "${lineItemData?.title}" - Qty: ${quantity}, Unit: $${unitPrice.toFixed(2)}, Total: $${originalTotal.toFixed(2)}`);
+                    fulfillmentLineItemIndex++;
+                  }
+                }
+              }
+            }
+          }
+        } catch (fulfillmentErr) {
+          log(`Order ${order.id}: Error fetching fulfillments via GraphQL:`, fulfillmentErr.message);
+          // Fallback to line items only if fulfillment query fails (but still skip cancelled items)
+          if (order.line_items && order.line_items.length > 0) {
+            let lineItemIndex = 0;
+            order.line_items.forEach((lineItem) => {
+              // Skip cancelled, refunded, or removed items
+              if (lineItem.fulfillment_status === 'cancelled' || 
+                  lineItem.fulfillment_status === 'refunded' ||
+                  lineItem.fulfillment_status === 'removed') {
+                return;
+              }
+
+              const quantity = Number(lineItem.quantity) || 0;
+              const unitPrice = Number(lineItem.price) || 0;
+              const totalPrice = (unitPrice * quantity);
+
+              orderLineItems.push({
+                order_id: order.id,
+                order_number: orderNumber,
+                created_date: createdDate,
+                fulfilled_date: fulfilledDate || createdDate,
+                product_title: lineItem.title || lineItem.name,
+                variant_title: lineItem.variant_title || '',
+                sku: lineItem.sku || '',
+                unit_price: unitPrice,
+                quantity: quantity,
+                price: parseFloat(totalPrice.toFixed(2)),
+                additional_charges: lineItemIndex === 0 ? additionalCharges : 0,
+                customer_id: order.customer?.id,
+                customer_name: customerName,
+                customer_email: customerEmail,
+                fulfillment_status: lineItem.fulfillment_status
+              });
+
+              log(`Order ${orderNumber}: Fallback item "${lineItem.title}" - Qty: ${quantity}, Unit: $${unitPrice}, Total: $${totalPrice.toFixed(2)}`);
+              lineItemIndex++;
+            });
+          }
         }
 
         // Small delay to avoid rate limiting
         await new Promise(resolve => setTimeout(resolve, 50));
       } catch (error) {
         log(`Error processing order ${order.id}:`, error.message);
-        
-        // Add minimal line items even if metafield fetch fails
-        if (order.line_items && order.line_items.length > 0) {
-          const orderNumber = order.name ? String(order.name).replace('#','').trim() : String(order.id);
-          
-          order.line_items.forEach((lineItem, index) => {
-            if (lineItem.fulfillment_status === 'cancelled' || 
-                lineItem.fulfillment_status === 'refunded' ||
-                lineItem.fulfillment_status === 'removed') {
-              return;
-            }
-
-            const quantity = Number(lineItem.quantity) || 0;
-            const unitPrice = Number(lineItem.price) || 0;
-            const totalPrice = (unitPrice * quantity);
-
-            orderLineItems.push({
-              order_id: order.id,
-              order_number: orderNumber,
-              created_date: order.created_at,
-              fulfilled_date: order.created_at,
-              product_title: lineItem.title || lineItem.name,
-              variant_title: lineItem.variant_title || '',
-              sku: lineItem.sku || '',
-              unit_price: unitPrice,
-              quantity: quantity,
-              price: parseFloat(totalPrice.toFixed(2)),
-              additional_charges: 0,
-              customer_id: order.customer?.id,
-              customer_name: getCustomerName(order.customer?.id),
-              customer_email: order.customer?.email || null,
-              fulfillment_status: lineItem.fulfillment_status,
-              error: error.message
-            });
-          });
-        }
+        // Continue with next order if metafield fetch fails
       }
     }
 
