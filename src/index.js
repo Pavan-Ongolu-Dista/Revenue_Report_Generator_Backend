@@ -703,10 +703,15 @@ app.get('/api/orders', async (req, res) => {
     log('Fetching fulfilled orders', { start, end, customerId });
     
     const limit = 250;
+    // We use created_at for initial Shopify API filtering (since that's what Shopify supports)
+    // Then we filter by fulfilled_at date on the client side
+    
     const params = new URLSearchParams({
       limit: String(limit),
       status: 'any',
       fulfillment_status: 'shipped', // Filter for fulfilled orders only
+      created_at_min: startDate.toISOString(),
+      created_at_max: endDate.toISOString(),
       fields: 'id,name,created_at,customer,line_items,metafields,fulfillment_status,fulfillments'
     });
     if (customerId) params.set('customer_id', String(customerId));
@@ -853,11 +858,18 @@ app.post('/api/report', async (req, res) => {
     log('Generating report for fulfilled orders', { start, end, metric, customerId });
     
     const limit = 250;
+    // We use created_at for initial Shopify API filtering (since that's what Shopify supports)
+    // Then we filter by fulfilled_at date on the client side
+    const reportStartDate = new Date(start);
+    const reportEndDate = new Date(end);
+    
     const params = new URLSearchParams({
       limit: String(limit),
       status: 'any',
       fulfillment_status: 'shipped', // Filter for fulfilled orders only
-      fields: 'id,name,created_at,customer,line_items,metafields,fulfillment_status'
+      created_at_min: reportStartDate.toISOString(),
+      created_at_max: reportEndDate.toISOString(),
+      fields: 'id,name,created_at,customer,line_items,metafields,fulfillment_status,fulfillments'
     });
     if (customerId) params.set('customer_id', String(customerId));
     
@@ -888,6 +900,21 @@ app.post('/api/report', async (req, res) => {
     // Build enhanced dataframe-like results with GraphQL metafield fetching
     const rows = [];
     for (const o of orders) {
+      // Filter by fulfilled date - only include orders fulfilled within the date range
+      let fulfilledDate = null;
+      if (o.fulfillments && o.fulfillments.length > 0) {
+        fulfilledDate = o.fulfillments.reduce((latest, f) => {
+          const fDate = new Date(f.updated_at || f.created_at);
+          const latestDate = latest ? new Date(latest) : new Date(0);
+          return fDate > latestDate ? f.updated_at || f.created_at : latest;
+        }, null);
+      }
+      
+      // Skip orders not fulfilled within the date range
+      if (!fulfilledDate || new Date(fulfilledDate) < new Date(start) || new Date(fulfilledDate) > new Date(end)) {
+        continue;
+      }
+
       try {
         // Fetch metafields using GraphQL for better performance
         const query = `
@@ -1045,7 +1072,7 @@ app.post('/api/report', async (req, res) => {
         rows.push({
           order_id: o.id,
           order_number,
-          order_date: created_at,
+          order_date: fulfilledDate,
           customer_id,
           customer_name: getCustomerName(customer_id),
           customer_email,
