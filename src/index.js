@@ -707,9 +707,7 @@ app.get('/api/orders', async (req, res) => {
       limit: String(limit),
       status: 'any',
       fulfillment_status: 'shipped', // Filter for fulfilled orders only
-      created_at_min: startDate.toISOString(),
-      created_at_max: endDate.toISOString(),
-      fields: 'id,name,created_at,customer,line_items,metafields,fulfillment_status'
+      fields: 'id,name,created_at,customer,line_items,metafields,fulfillment_status,fulfillments'
     });
     if (customerId) params.set('customer_id', String(customerId));
     
@@ -749,10 +747,23 @@ app.get('/api/orders', async (req, res) => {
       batches: Math.ceil(orders.length / limit),
       dateRange: { start, end }
     });
+
+    // Filter orders by fulfilled date
+    const filteredOrders = orders.filter(order => {
+      let fulfilledDate = null;
+      if (order.fulfillments && order.fulfillments.length > 0) {
+        fulfilledDate = order.fulfillments.reduce((latest, f) => {
+          const fDate = new Date(f.updated_at || f.created_at);
+          const latestDate = latest ? new Date(latest) : new Date(0);
+          return fDate > latestDate ? f.updated_at || f.created_at : latest;
+        }, null);
+      }
+      return fulfilledDate && new Date(fulfilledDate) >= new Date(start) && new Date(fulfilledDate) <= new Date(end);
+    });
     
     res.json({ 
-      orders,
-      count: orders.length,
+      orders: filteredOrders,
+      count: filteredOrders.length,
       dateRange: { start, end },
       customerId: customerId || null
     });
@@ -846,8 +857,6 @@ app.post('/api/report', async (req, res) => {
       limit: String(limit),
       status: 'any',
       fulfillment_status: 'shipped', // Filter for fulfilled orders only
-      created_at_min: new Date(start).toISOString(),
-      created_at_max: new Date(end).toISOString(),
       fields: 'id,name,created_at,customer,line_items,metafields,fulfillment_status'
     });
     if (customerId) params.set('customer_id', String(customerId));
@@ -1083,7 +1092,7 @@ app.post('/api/report', async (req, res) => {
         rows.push({
           order_id: o.id,
           order_number,
-          order_date: created_at,
+          order_date: fulfilledDate,
           customer_id,
           customer_name: getCustomerName(customer_id),
           customer_email,
@@ -1283,6 +1292,11 @@ app.post('/api/order-details', async (req, res) => {
             const latestDate = latest ? new Date(latest) : new Date(0);
             return fDate > latestDate ? f.updated_at || f.created_at : latest;
           }, null);
+        }
+
+        // Filter orders where fulfilled date is within the specified range
+        if (!fulfilledDate || new Date(fulfilledDate) < new Date(start) || new Date(fulfilledDate) > new Date(end)) {
+          continue;
         }
 
         const orderNumber = order.name ? String(order.name).replace('#','').trim() : String(order.id);
