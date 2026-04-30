@@ -64,7 +64,8 @@ const customerInfo = {
   '9138324275479': { name: '@3120 Team'},
   '9161889743127': { name: 'Llamaindex Team', email: 'llamaindex@veeryoffices.com' },
   '9253797691671': { name: 'AYR Energy Team', email: 'ayrenergy@veeryoffices.com'},
-  '9253770690839': { name: 'Lemon slice Team', email: 'lemonslice@veeryoffices.com'}
+  '9253770690839': { name: 'Lemon slice Team', email: 'lemonslice@veeryoffices.com'},
+  '9354786537751': { name: 'Plain Team', email: 'plain@veeryoffices.com'}
 };
 
 // Helper function to get customer name by ID
