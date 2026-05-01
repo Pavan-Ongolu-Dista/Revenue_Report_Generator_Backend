@@ -710,9 +710,9 @@ app.get('/api/orders', async (req, res) => {
       limit: String(limit),
       status: 'any',
       fulfillment_status: 'shipped', // Filter for fulfilled orders only
-      created_at_min: startDate.toISOString(),
-      created_at_max: endDate.toISOString(),
-      fields: 'id,name,created_at,customer,line_items,metafields,fulfillment_status,fulfillments'
+      updated_at_min: startDate.toISOString(),
+      updated_at_max: endDate.toISOString(),
+      fields: 'id,name,created_at,updated_at,customer,line_items,metafields,fulfillment_status,fulfillments'
     });
     if (customerId) params.set('customer_id', String(customerId));
     
@@ -867,9 +867,9 @@ app.post('/api/report', async (req, res) => {
       limit: String(limit),
       status: 'any',
       fulfillment_status: 'shipped', // Filter for fulfilled orders only
-      created_at_min: reportStartDate.toISOString(),
-      created_at_max: reportEndDate.toISOString(),
-      fields: 'id,name,created_at,customer,line_items,metafields,fulfillment_status,fulfillments'
+      updated_at_min: reportStartDate.toISOString(),
+      updated_at_max: reportEndDate.toISOString(),
+      fields: 'id,name,created_at,updated_at,customer,line_items,metafields,fulfillment_status,fulfillments'
     });
     if (customerId) params.set('customer_id', String(customerId));
     
@@ -1244,8 +1244,8 @@ app.post('/api/order-details', async (req, res) => {
       limit: String(limit),
       status: 'any',
       fulfillment_status: 'shipped',
-      created_at_min: new Date(start).toISOString(),
-      created_at_max: new Date(end).toISOString(),
+      updated_at_min: new Date(start).toISOString(),
+      updated_at_max: new Date(end).toISOString(),
       customer_id: String(customerId),
       fields: 'id,name,created_at,updated_at,customer,line_items,metafields,fulfillments'
     });
