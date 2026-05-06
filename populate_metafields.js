@@ -97,7 +97,7 @@ async function populateMetafields() {
       
       console.log(`\n📝 Processing order ${order.name} (ID: ${order.id})`);
       
-      // Add additional charges metafield
+      // Add additional taxes metafield
       await addMetafieldToOrder(
         order.id,
         'distacart',

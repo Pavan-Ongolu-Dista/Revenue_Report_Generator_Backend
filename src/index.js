@@ -788,7 +788,7 @@ function parseAdditionalCharges(metafields) {
   for (const m of (metafields || [])) {
     const ns = m.namespace || '';
     const key = m.key || '';
-    if ((ns === 'distacart' && key === 'additional_charges') || key === 'distacart.additional_charges') {
+    if ((ns === 'distacart' && (key === 'additional_charges' || key === 'additional_taxes')) || key === 'distacart.additional_charges' || key === 'distacart.additional_taxes') {
       const v = m.value;
       
       // Handle JSON money format
@@ -1077,7 +1077,7 @@ app.post('/api/report', async (req, res) => {
           customer_name: getCustomerName(customer_id),
           customer_email,
           line_sum,
-          additional_charges: additional,
+          additional_taxes: additional,
           billing_amount: billing,
           actual_spend: actual,
           profit_margin: billing > 0 ? ((billing - actual) / billing * 100) : 0
@@ -1124,7 +1124,7 @@ app.post('/api/report', async (req, res) => {
           customer_name: getCustomerName(customer_id),
           customer_email,
           line_sum,
-          additional_charges: 0,
+          additional_taxes: 0,
           billing_amount: line_sum,
           actual_spend: 0,
           profit_margin: 0
@@ -1282,7 +1282,7 @@ app.post('/api/order-details', async (req, res) => {
 
     for (const order of orders) {
       try {
-        // Fetch metafields using GraphQL to get additional charges
+        // Fetch metafields using GraphQL to get additional taxes
         const metafieldQuery = `
           query getOrderMetafields($id: ID!) {
             order(id: $id) {
@@ -1407,7 +1407,7 @@ app.post('/api/order-details', async (req, res) => {
                       unit_price: parseFloat(unitPrice.toFixed(2)),
                       quantity: quantity,
                       price: parseFloat(originalTotal.toFixed(2)),
-                      additional_charges: fulfillmentLineItemIndex === 0 ? additionalCharges : 0, // Additional charges only on first item
+                      additional_taxes: fulfillmentLineItemIndex === 0 ? additionalCharges : 0, // Additional taxes only on first item
                       customer_id: order.customer?.id,
                       customer_name: customerName,
                       customer_email: customerEmail,
@@ -1454,7 +1454,7 @@ app.post('/api/order-details', async (req, res) => {
                 unit_price: unitPrice,
                 quantity: quantity,
                 price: parseFloat(totalPrice.toFixed(2)),
-                additional_charges: lineItemIndex === 0 ? additionalCharges : 0,
+                additional_taxes: lineItemIndex === 0 ? additionalCharges : 0,
                 customer_id: order.customer?.id,
                 customer_name: customerName,
                 customer_email: customerEmail,
@@ -1498,7 +1498,7 @@ app.post('/api/order-details', async (req, res) => {
                 unit_price: unitPrice,
                 quantity: quantity,
                 price: parseFloat(totalPrice.toFixed(2)),
-                additional_charges: lineItemIndex === 0 ? additionalCharges : 0,
+                additional_taxes: lineItemIndex === 0 ? additionalCharges : 0,
                 customer_id: order.customer?.id,
                 customer_name: customerName,
                 customer_email: customerEmail,
@@ -1536,7 +1536,7 @@ app.post('/api/order-details', async (req, res) => {
       summary: {
         total_line_items: totalItems,
         total_amount: parseFloat(totalAmount.toFixed(2)),
-        total_additional_charges: parseFloat(totalAdditionalCharges.toFixed(2)),
+        total_additional_taxes: parseFloat(totalAdditionalCharges.toFixed(2)),
         total_with_charges: parseFloat(totalWithCharges.toFixed(2)),
         date_range: { start, end },
         customer_id: customerId
