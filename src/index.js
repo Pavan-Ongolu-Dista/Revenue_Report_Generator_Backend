@@ -217,6 +217,32 @@ function orderFulfilledInRange(order, start, end) {
   return getRepresentativeFulfillmentDateInRange(order, start, end) != null;
 }
 
+function dedupeOrdersById(orders) {
+  const map = new Map();
+  for (const order of orders || []) {
+    if (order?.id != null) map.set(String(order.id), order);
+  }
+  return Array.from(map.values());
+}
+
+function compareReportDetailRows(a, b) {
+  const dateDiff = new Date(b.order_date).getTime() - new Date(a.order_date).getTime();
+  if (dateDiff !== 0) return dateDiff;
+  const numA = Number(a.order_number) || 0;
+  const numB = Number(b.order_number) || 0;
+  if (numB !== numA) return numB - numA;
+  return String(b.order_id).localeCompare(String(a.order_id));
+}
+
+function finalizeReportDetailRows(rows) {
+  const byOrderId = new Map();
+  for (const row of rows || []) {
+    const key = String(row.order_id);
+    if (!byOrderId.has(key)) byOrderId.set(key, row);
+  }
+  return Array.from(byOrderId.values()).sort(compareReportDetailRows);
+}
+
 async function fetchAllShippedOrders({ customerId, fields = SHIPPED_ORDER_LIST_FIELDS }) {
   const limit = 250;
   const params = new URLSearchParams({
@@ -246,8 +272,14 @@ async function fetchAllShippedOrders({ customerId, fields = SHIPPED_ORDER_LIST_F
       customerId: customerId || 'all'
     });
 
+    if (chunk.length === 0) break;
     if (chunk.length < limit) break;
-    since_id = chunk[chunk.length - 1].id;
+    const lastId = chunk[chunk.length - 1].id;
+    if (since_id != null && String(lastId) === String(since_id)) {
+      log('WARNING: Shopify pagination returned duplicate since_id; stopping', { since_id: lastId });
+      break;
+    }
+    since_id = lastId;
 
     if (totalFetched > 10000) {
       log('WARNING: Reached maximum records limit (10000)', { totalFetched });
@@ -255,7 +287,7 @@ async function fetchAllShippedOrders({ customerId, fields = SHIPPED_ORDER_LIST_F
     }
   }
 
-  return orders;
+  return dedupeOrdersById(orders);
 }
 
 app.get('/health', (_req, res) => {
@@ -1144,12 +1176,14 @@ app.post('/api/report', async (req, res) => {
       }
     }
 
+    const detail = finalizeReportDetailRows(rows);
+
     // Enhanced grouping and analytics
     const monthKey = (iso) => new Date(iso).toISOString().slice(0,7);
     const metricField = metric === 'actual' ? 'actual_spend' : 'billing_amount';
     const groups = new Map();
     
-    for (const r of rows) {
+    for (const r of detail) {
       const month = monthKey(r.order_date);
       const customerKey = r.customer_email || String(r.customer_id || 'unknown');
       const key = customerKey + '|' + month;
@@ -1192,11 +1226,14 @@ app.post('/api/report', async (req, res) => {
     }).sort((a,b)=> a.month.localeCompare(b.month) || String(a.customer).localeCompare(String(b.customer)));
 
     // Calculate overall analytics
-    const totalRevenue = summary.reduce((sum, g) => sum + g.amount, 0);
-    const totalOrders = summary.reduce((sum, g) => sum + g.orders, 0);
-    const uniqueCustomers = new Set(summary.map(g => g.customer)).size;
-    const avgProfitMargin = summary.length > 0 ? 
-      summary.reduce((sum, g) => sum + g.profit_margin, 0) / summary.length : 0;
+    const totalRevenue = detail.reduce((sum, r) => sum + Number(r[metricField] || 0), 0);
+    const totalOrders = detail.length;
+    const uniqueCustomers = new Set(detail.map((r) => r.customer_email || String(r.customer_id || 'unknown'))).size;
+    const totalBillingAll = detail.reduce((sum, r) => sum + Number(r.billing_amount || 0), 0);
+    const totalActualAll = detail.reduce((sum, r) => sum + Number(r.actual_spend || 0), 0);
+    const avgProfitMargin = totalBillingAll > 0
+      ? ((totalBillingAll - totalActualAll) / totalBillingAll) * 100
+      : 0;
 
     const analytics = {
       totalRevenue,
@@ -1212,11 +1249,11 @@ app.post('/api/report', async (req, res) => {
 
     res.json({ 
       summary, 
-      detail: rows,
+      detail,
       analytics,
       metadata: {
         generatedAt: new Date().toISOString(),
-        totalRecords: rows.length,
+        totalRecords: detail.length,
         summaryRecords: summary.length
       }
     });
