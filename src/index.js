@@ -146,7 +146,7 @@ function shopify() {
 }
 
 const SHIPPED_ORDER_LIST_FIELDS =
-  'id,name,created_at,processed_at,closed_at,customer,line_items,metafields,fulfillment_status,fulfillments';
+  'id,name,created_at,customer,line_items,metafields,fulfillment_status,fulfillments';
 
 function parseInclusiveRangeBounds(start, end) {
   const startMs = new Date(start).getTime();
@@ -241,6 +241,7 @@ function finalizeReportDetailRows(rows) {
   return Array.from(byOrderId.values()).sort(compareReportDetailRows);
 }
 
+/** Paginate shipped orders from Shopify. No created_at/updated_at list filters — date range is applied in-app via fulfillment created_at / line-item shipped status. */
 async function fetchAllShippedOrders({ customerId, fields = SHIPPED_ORDER_LIST_FIELDS }) {
   const limit = 250;
   const params = new URLSearchParams({
@@ -289,7 +290,15 @@ async function fetchAllShippedOrders({ customerId, fields = SHIPPED_ORDER_LIST_F
 }
 
 app.get('/health', (_req, res) => {
-  res.json({ ok: true });
+  res.json({
+    ok: true,
+    reportDateLogic: {
+      shopifyOrderListFilters: ['status=any', 'fulfillment_status=shipped'],
+      excludedShopifyParams: ['updated_at_min', 'updated_at_max', 'created_at_min', 'created_at_max'],
+      inRangeBy: 'fulfillment.created_at (REST) and fulfillment.createdAt (GraphQL) only',
+      lineItems: 'fulfillment_status fulfilled | shipped | partial, or fully shipped qty'
+    }
+  });
 });
 
 // Debug endpoint to list all metafields for orders
@@ -764,7 +773,6 @@ app.get('/api/debug/customer-details', async (req, res) => {
           phone
           tags
           createdAt
-          updatedAt
         }
       }
     `;
