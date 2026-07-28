@@ -145,6 +145,119 @@ function shopify() {
   return instance;
 }
 
+const SHIPPED_ORDER_LIST_FIELDS =
+  'id,name,created_at,processed_at,closed_at,customer,line_items,metafields,fulfillment_status,fulfillments';
+
+function parseInclusiveRangeBounds(start, end) {
+  const startMs = new Date(start).getTime();
+  const endMs = new Date(end).getTime();
+  return { startMs, endMs };
+}
+
+function isTimestampInInclusiveRange(isoTimestamp, startMs, endMs) {
+  const t = new Date(isoTimestamp).getTime();
+  if (Number.isNaN(t)) return false;
+  return t >= startMs && t <= endMs;
+}
+
+function isLineItemShippedOrDelivered(lineItem) {
+  const status = String(lineItem?.fulfillment_status || '').toLowerCase();
+  if (status === 'fulfilled' || status === 'shipped' || status === 'partial') {
+    return true;
+  }
+  const fulfillable = Number(lineItem?.fulfillable_quantity);
+  const qty = Number(lineItem?.quantity) || 0;
+  return qty > 0 && fulfillable === 0;
+}
+
+function orderHasShippedLineItems(order) {
+  return (order?.line_items || []).some(isLineItemShippedOrDelivered);
+}
+
+function getFulfillmentEventTimestamps(order) {
+  const timestamps = [];
+  for (const f of order?.fulfillments || []) {
+    const ts = f.created_at || f.updated_at;
+    if (ts) timestamps.push(ts);
+  }
+  return timestamps;
+}
+
+function orderIsShippedForReporting(order) {
+  if ((order?.fulfillments || []).length > 0) return true;
+  const fs = String(order?.fulfillment_status || '').toLowerCase();
+  if (fs === 'shipped' || fs === 'fulfilled' || fs === 'partial') return true;
+  return orderHasShippedLineItems(order);
+}
+
+function getFulfillmentDatesInRange(order, start, end) {
+  const { startMs, endMs } = parseInclusiveRangeBounds(start, end);
+  return getFulfillmentEventTimestamps(order).filter((ts) =>
+    isTimestampInInclusiveRange(ts, startMs, endMs)
+  );
+}
+
+/** Latest fulfillment event within [start, end], or null if none qualify. */
+function getRepresentativeFulfillmentDateInRange(order, start, end) {
+  const inRange = getFulfillmentDatesInRange(order, start, end);
+  if (inRange.length > 0) {
+    const maxMs = Math.max(...inRange.map((ts) => new Date(ts).getTime()));
+    return new Date(maxMs).toISOString();
+  }
+  if (!orderIsShippedForReporting(order)) return null;
+  const { startMs, endMs } = parseInclusiveRangeBounds(start, end);
+  const fallback = order.processed_at || order.closed_at;
+  if (fallback && isTimestampInInclusiveRange(fallback, startMs, endMs)) {
+    return new Date(fallback).toISOString();
+  }
+  return null;
+}
+
+function orderFulfilledInRange(order, start, end) {
+  return getRepresentativeFulfillmentDateInRange(order, start, end) != null;
+}
+
+async function fetchAllShippedOrders({ customerId, fields = SHIPPED_ORDER_LIST_FIELDS }) {
+  const limit = 250;
+  const params = new URLSearchParams({
+    limit: String(limit),
+    status: 'any',
+    fulfillment_status: 'shipped',
+    fields
+  });
+  if (customerId) params.set('customer_id', String(customerId));
+
+  const orders = [];
+  let since_id = null;
+  let totalFetched = 0;
+
+  while (true) {
+    const requestParams = new URLSearchParams(params);
+    if (since_id) requestParams.set('since_id', String(since_id));
+
+    const { data } = await shopify().get(`orders.json?${requestParams.toString()}`);
+    const chunk = data.orders || [];
+    orders.push(...chunk);
+    totalFetched += chunk.length;
+
+    log('Fetched shipped orders batch', {
+      chunkSize: chunk.length,
+      totalFetched,
+      customerId: customerId || 'all'
+    });
+
+    if (chunk.length < limit) break;
+    since_id = chunk[chunk.length - 1].id;
+
+    if (totalFetched > 10000) {
+      log('WARNING: Reached maximum records limit (10000)', { totalFetched });
+      break;
+    }
+  }
+
+  return orders;
+}
+
 app.get('/health', (_req, res) => {
   res.json({ ok: true });
 });
@@ -701,70 +814,15 @@ app.get('/api/orders', async (req, res) => {
     }
 
     log('Fetching fulfilled orders', { start, end, customerId });
-    
-    const limit = 250;
-    // We use created_at for initial Shopify API filtering (since that's what Shopify supports)
-    // Then we filter by fulfilled_at date on the client side
-    
-    const params = new URLSearchParams({
-      limit: String(limit),
-      status: 'any',
-      fulfillment_status: 'shipped', // Filter for fulfilled orders only
-      updated_at_min: startDate.toISOString(),
-      updated_at_max: endDate.toISOString(),
-      fields: 'id,name,created_at,updated_at,customer,line_items,metafields,fulfillment_status,fulfillments'
-    });
-    if (customerId) params.set('customer_id', String(customerId));
-    
-    const orders = [];
-    let since_id = null;
-    let totalFetched = 0;
-    
-    while (true) {
-      const requestParams = new URLSearchParams(params);
-      if (since_id) {
-        requestParams.set('since_id', since_id);
-      }
-      
-      const { data } = await shopify().get(`orders.json?${requestParams.toString()}`);
-      const chunk = data.orders || [];
-      orders.push(...chunk);
-      totalFetched += chunk.length;
-      
-      log(`Fetched batch`, { 
-        chunkSize: chunk.length, 
-        totalFetched,
-        hasMore: chunk.length === limit 
-      });
-      
-      if (chunk.length < limit) break;
-      since_id = chunk[chunk.length - 1].id;
-      
-      // Safety limit to prevent infinite loops
-      if (totalFetched > 10000) {
-        log('WARNING: Reached maximum records limit (10000)', { totalFetched });
-        break;
-      }
-    }
-    
-    log('Fulfilled orders fetched successfully', { 
-      totalOrders: orders.length, 
-      batches: Math.ceil(orders.length / limit),
+
+    const orders = await fetchAllShippedOrders({ customerId });
+
+    log('Shipped orders fetched; applying fulfillment-date filter', {
+      totalOrders: orders.length,
       dateRange: { start, end }
     });
 
-    // Filter orders by fulfilled date
-    const filteredOrders = orders.filter(order => {
-      let fulfilledDate = null;
-      if (order.fulfillments && order.fulfillments.length > 0) {
-        fulfilledDate = order.fulfillments.reduce((latest, f) => {
-          const fDate = new Date(f.updated_at || f.created_at);
-          const latestDate = latest ? new Date(latest) : new Date(0);
-          return fDate > latestDate ? f.updated_at || f.created_at : latest;
-        }, null);
-      }
-      return fulfilledDate && new Date(fulfilledDate) >= new Date(start) && new Date(fulfilledDate) <= new Date(end);
-    });
+    const filteredOrders = orders.filter((order) => orderFulfilledInRange(order, start, end));
     
     res.json({ 
       orders: filteredOrders,
@@ -856,62 +914,14 @@ app.post('/api/report', async (req, res) => {
     }
 
     log('Generating report for fulfilled orders', { start, end, metric, customerId });
-    
-    const limit = 250;
-    // We use created_at for initial Shopify API filtering (since that's what Shopify supports)
-    // Then we filter by fulfilled_at date on the client side
-    const reportStartDate = new Date(start);
-    const reportEndDate = new Date(end);
-    
-    const params = new URLSearchParams({
-      limit: String(limit),
-      status: 'any',
-      fulfillment_status: 'shipped', // Filter for fulfilled orders only
-      updated_at_min: reportStartDate.toISOString(),
-      updated_at_max: reportEndDate.toISOString(),
-      fields: 'id,name,created_at,updated_at,customer,line_items,metafields,fulfillment_status,fulfillments'
-    });
-    if (customerId) params.set('customer_id', String(customerId));
-    
-    const orders = [];
-    let since_id = null;
-    let totalFetched = 0;
-    
-    while (true) {
-      const requestParams = new URLSearchParams(params);
-      if (since_id) {
-        requestParams.set('since_id', since_id);
-      }
-      
-      const { data } = await shopify().get(`orders.json?${requestParams.toString()}`);
-      const chunk = data.orders || [];
-      orders.push(...chunk);
-      totalFetched += chunk.length;
-      
-      if (chunk.length < limit) break;
-      since_id = chunk[chunk.length - 1].id;
-      
-      // Safety limit to prevent infinite loops
-      if (totalFetched > 10000) {
-        log('WARNING: Reached maximum records limit (10000)', { totalFetched });
-        break;
-      }
-    }
+
+    const orders = await fetchAllShippedOrders({ customerId });
+
     // Build enhanced dataframe-like results with GraphQL metafield fetching
     const rows = [];
     for (const o of orders) {
-      // Filter by fulfilled date - only include orders fulfilled within the date range
-      let fulfilledDate = null;
-      if (o.fulfillments && o.fulfillments.length > 0) {
-        fulfilledDate = o.fulfillments.reduce((latest, f) => {
-          const fDate = new Date(f.updated_at || f.created_at);
-          const latestDate = latest ? new Date(latest) : new Date(0);
-          return fDate > latestDate ? f.updated_at || f.created_at : latest;
-        }, null);
-      }
-      
-      // Skip orders not fulfilled within the date range
-      if (!fulfilledDate || new Date(fulfilledDate) < new Date(start) || new Date(fulfilledDate) > new Date(end)) {
+      const fulfilledDate = getRepresentativeFulfillmentDateInRange(o, start, end);
+      if (!fulfilledDate) {
         continue;
       }
 
@@ -1240,44 +1250,10 @@ app.post('/api/order-details', async (req, res) => {
     }
 
     log('Fetching detailed order information', { start, end, customerId });
-    
-    const limit = 250;
-    const params = new URLSearchParams({
-      limit: String(limit),
-      status: 'any',
-      fulfillment_status: 'shipped',
-      updated_at_min: new Date(start).toISOString(),
-      updated_at_max: new Date(end).toISOString(),
-      customer_id: String(customerId),
-      fields: 'id,name,created_at,updated_at,customer,line_items,metafields,fulfillments'
-    });
-    
-    const orders = [];
-    let since_id = null;
-    let totalFetched = 0;
-    
-    // Fetch all orders for the customer in the date range
-    while (true) {
-      const requestParams = new URLSearchParams(params);
-      if (since_id) {
-        requestParams.set('since_id', since_id);
-      }
-      
-      const { data } = await shopify().get(`orders.json?${requestParams.toString()}`);
-      const chunk = data.orders || [];
-      orders.push(...chunk);
-      totalFetched += chunk.length;
-      
-      if (chunk.length < limit) break;
-      since_id = chunk[chunk.length - 1].id;
-      
-      if (totalFetched > 10000) {
-        log('WARNING: Reached maximum records limit (10000)', { totalFetched });
-        break;
-      }
-    }
 
-    log('Fetched orders for detailed analysis', { count: orders.length });
+    const orders = await fetchAllShippedOrders({ customerId });
+
+    log('Fetched shipped orders for detailed analysis', { count: orders.length });
 
     // Build detailed line items data exactly matching CSV format
     const orderLineItems = [];
@@ -1312,19 +1288,8 @@ app.post('/api/order-details', async (req, res) => {
         const orderMetafields = metafieldData.data?.order?.metafields?.edges?.map(edge => edge.node) || [];
         const additionalCharges = parseAdditionalCharges(orderMetafields);
 
-        // Get the fulfilled date from fulfillments
-        let fulfilledDate = null;
-        if (order.fulfillments && order.fulfillments.length > 0) {
-          // Get the most recent fulfillment date
-          fulfilledDate = order.fulfillments.reduce((latest, f) => {
-            const fDate = new Date(f.updated_at || f.created_at);
-            const latestDate = latest ? new Date(latest) : new Date(0);
-            return fDate > latestDate ? f.updated_at || f.created_at : latest;
-          }, null);
-        }
-
-        // Filter orders where fulfilled date is within the specified range
-        if (!fulfilledDate || new Date(fulfilledDate) < new Date(start) || new Date(fulfilledDate) > new Date(end)) {
+        const fulfilledDate = getRepresentativeFulfillmentDateInRange(order, start, end);
+        if (!fulfilledDate) {
           continue;
         }
 
