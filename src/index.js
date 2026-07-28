@@ -177,44 +177,42 @@ function orderHasShippedLineItems(order) {
 function getFulfillmentEventTimestamps(order) {
   const timestamps = [];
   for (const f of order?.fulfillments || []) {
-    const ts = f.created_at || f.updated_at;
-    if (ts) timestamps.push(ts);
+    if (f.created_at) timestamps.push(f.created_at);
   }
   return timestamps;
 }
 
-function orderIsShippedForReporting(order) {
-  if ((order?.fulfillments || []).length > 0) return true;
-  const fs = String(order?.fulfillment_status || '').toLowerCase();
-  if (fs === 'shipped' || fs === 'fulfilled' || fs === 'partial') return true;
-  return orderHasShippedLineItems(order);
+function isFulfillmentTimestampInRange(isoTimestamp, start, end) {
+  if (!isoTimestamp) return false;
+  const { startMs, endMs } = parseInclusiveRangeBounds(start, end);
+  return isTimestampInInclusiveRange(isoTimestamp, startMs, endMs);
 }
 
 function getFulfillmentDatesInRange(order, start, end) {
-  const { startMs, endMs } = parseInclusiveRangeBounds(start, end);
   return getFulfillmentEventTimestamps(order).filter((ts) =>
-    isTimestampInInclusiveRange(ts, startMs, endMs)
+    isFulfillmentTimestampInRange(ts, start, end)
   );
 }
 
-/** Latest fulfillment event within [start, end], or null if none qualify. */
+/** Latest fulfillment created_at within [start, end], or null if none qualify. */
 function getRepresentativeFulfillmentDateInRange(order, start, end) {
   const inRange = getFulfillmentDatesInRange(order, start, end);
-  if (inRange.length > 0) {
-    const maxMs = Math.max(...inRange.map((ts) => new Date(ts).getTime()));
-    return new Date(maxMs).toISOString();
-  }
-  if (!orderIsShippedForReporting(order)) return null;
-  const { startMs, endMs } = parseInclusiveRangeBounds(start, end);
-  const fallback = order.processed_at || order.closed_at;
-  if (fallback && isTimestampInInclusiveRange(fallback, startMs, endMs)) {
-    return new Date(fallback).toISOString();
-  }
-  return null;
+  if (inRange.length === 0) return null;
+  const maxMs = Math.max(...inRange.map((ts) => new Date(ts).getTime()));
+  return new Date(maxMs).toISOString();
 }
 
 function orderFulfilledInRange(order, start, end) {
   return getRepresentativeFulfillmentDateInRange(order, start, end) != null;
+}
+
+function addFulfillmentLineItemsInRange(fulfillment, start, end, onItem) {
+  if (fulfillment.status !== 'SUCCESS' || !fulfillment.fulfillmentLineItems?.edges) return;
+  const createdAt = fulfillment.createdAt;
+  if (!isFulfillmentTimestampInRange(createdAt, start, end)) return;
+  for (const edge of fulfillment.fulfillmentLineItems.edges) {
+    onItem(edge.node);
+  }
 }
 
 function dedupeOrdersById(orders) {
@@ -1005,6 +1003,7 @@ app.post('/api/report', async (req, res) => {
                 fulfillments(first: 10) {
                   id
                   status
+                  createdAt
                   fulfillmentLineItems(first: 50) {
                     edges {
                       node {
@@ -1045,9 +1044,7 @@ app.post('/api/report', async (req, res) => {
           const orderData = fulfillmentData.data?.order;
           if (orderData && orderData.fulfillments) {
             for (const fulfillment of orderData.fulfillments) {
-              if (fulfillment.status === 'SUCCESS' && fulfillment.fulfillmentLineItems?.edges) {
-                for (const edge of fulfillment.fulfillmentLineItems.edges) {
-                  const node = edge.node;
+              addFulfillmentLineItemsInRange(fulfillment, start, end, (node) => {
                   const quantity = Number(node.quantity) || 0;
                   const originalTotal = node.originalTotalSet?.shopMoney?.amount || 0;
                   const price = Number(originalTotal) / quantity || 0;
@@ -1057,8 +1054,7 @@ app.post('/api/report', async (req, res) => {
                     included_items++;
                     log(`Order ${o.id}: Including fulfilled item ${node.lineItem?.title} (${quantity} qty) - $${price} x ${quantity}`);
                   }
-                }
-              }
+              });
             }
           }
         } catch (fulfillmentErr) {
@@ -1346,6 +1342,7 @@ app.post('/api/order-details', async (req, res) => {
                 fulfillments(first: 10) {
                   id
                   status
+                  createdAt
                   fulfillmentLineItems(first: 50) {
                     edges {
                       node {
@@ -1388,12 +1385,9 @@ app.post('/api/order-details', async (req, res) => {
           let hadFulfillmentItems = false;
           
           if (orderFulfillmentData && orderFulfillmentData.fulfillments && orderFulfillmentData.fulfillments.length > 0) {
-            // Process only SUCCESS fulfillments
             for (const fulfillment of orderFulfillmentData.fulfillments) {
-              if (fulfillment.status === 'SUCCESS' && fulfillment.fulfillmentLineItems?.edges && fulfillment.fulfillmentLineItems.edges.length > 0) {
+              addFulfillmentLineItemsInRange(fulfillment, start, end, (node) => {
                 hadFulfillmentItems = true;
-                for (const edge of fulfillment.fulfillmentLineItems.edges) {
-                  const node = edge.node;
                   const lineItemData = node.lineItem;
                   const quantity = Number(node.quantity) || 0;
                   const originalTotal = Number(node.originalTotalSet?.shopMoney?.amount) || 0;
@@ -1422,8 +1416,7 @@ app.post('/api/order-details', async (req, res) => {
                     log(`Order ${orderNumber}: Fulfilled item "${lineItemData?.title}" - Qty: ${quantity}, Unit: $${unitPrice.toFixed(2)}, Total: $${originalTotal.toFixed(2)}`);
                     fulfillmentLineItemIndex++;
                   }
-                }
-              }
+              });
             }
           }
 
